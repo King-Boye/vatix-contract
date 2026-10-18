@@ -385,3 +385,188 @@ pub fn set_emergency_mode(env: &Env, mode: &EmergencyMode) {
         .instance()
         .set(&StorageKey::EmergencyMode, mode);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Env;
+
+    fn setup_versioned(env: &Env) -> Address {
+        let contract_id = env.register(crate::TreasuryContract, ());
+        env.as_contract(&contract_id, || set_version(env));
+        contract_id
+    }
+
+    #[test]
+    fn test_assert_version_passes_when_current() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        env.as_contract(&contract_id, || {
+            assert!(assert_version(&env).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_assert_version_fails_when_stale() {
+        let env = Env::default();
+        let contract_id = env.register(crate::TreasuryContract, ());
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&StorageKey::StorageVersion, &0u32);
+            assert_eq!(assert_version(&env), Err(TreasuryError::UpgradeRequired));
+        });
+    }
+
+    #[test]
+    fn test_assert_version_fails_when_missing() {
+        let env = Env::default();
+        let contract_id = env.register(crate::TreasuryContract, ());
+        env.as_contract(&contract_id, || {
+            assert_eq!(assert_version(&env), Err(TreasuryError::UpgradeRequired));
+        });
+    }
+
+    #[test]
+    fn test_admin_round_trip() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        let admin = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            assert!(!has_admin(&env));
+            set_admin(&env, &admin);
+            assert!(has_admin(&env));
+            assert_eq!(get_admin(&env).unwrap(), admin);
+        });
+    }
+
+    #[test]
+    fn test_authorized_markets_empty_by_default() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        env.as_contract(&contract_id, || {
+            let markets = get_authorized_markets(&env);
+            assert_eq!(markets.len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_authorized_markets_round_trip() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        let market1 = Address::generate(&env);
+        let market2 = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            let mut markets = soroban_sdk::vec![&env, market1.clone(), market2.clone()];
+            set_authorized_markets(&env, &markets);
+            assert!(is_authorized_market(&env, &market1));
+            assert!(is_authorized_market(&env, &market2));
+            assert_eq!(get_authorized_market(&env).unwrap(), market1);
+            // Remove first market
+            markets = soroban_sdk::vec![&env, market2.clone()];
+            set_authorized_markets(&env, &markets);
+            assert!(!is_authorized_market(&env, &market1));
+            assert!(is_authorized_market(&env, &market2));
+        });
+    }
+
+    #[test]
+    fn test_token_balance_defaults_to_zero() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        let token = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(get_token_balance(&env, &token).unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn test_token_balance_round_trip() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        let token = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            set_token_balance(&env, &token, 1_000_000);
+            assert_eq!(get_token_balance(&env, &token).unwrap(), 1_000_000);
+        });
+    }
+
+    #[test]
+    fn test_cumulative_fees_defaults_to_zero() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        let token = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(get_cumulative_fees(&env, &token).unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn test_fee_tokens_registry_is_idempotent() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        let token = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            register_fee_token(&env, &token);
+            register_fee_token(&env, &token); // idempotent
+            assert_eq!(get_fee_tokens(&env).len(), 1);
+        });
+    }
+
+    #[test]
+    fn test_pause_flag_defaults_to_false() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        env.as_contract(&contract_id, || {
+            assert!(!is_paused(&env));
+        });
+    }
+
+    #[test]
+    fn test_pause_flag_round_trip() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        env.as_contract(&contract_id, || {
+            set_paused(&env, true);
+            assert!(is_paused(&env));
+            set_paused(&env, false);
+            assert!(!is_paused(&env));
+        });
+    }
+
+    #[test]
+    fn test_total_collected_defaults_to_zero() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(get_total_collected(&env).unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn test_deposits_paused_defaults_to_false() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        env.as_contract(&contract_id, || {
+            assert!(!is_deposits_paused(&env));
+            assert!(assert_deposits_not_paused(&env).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_deposits_paused_round_trip() {
+        let env = Env::default();
+        let contract_id = setup_versioned(&env);
+        env.as_contract(&contract_id, || {
+            set_deposits_paused(&env, true);
+            assert!(is_deposits_paused(&env));
+            assert_eq!(
+                assert_deposits_not_paused(&env),
+                Err(TreasuryError::DepositsPaused)
+            );
+            set_deposits_paused(&env, false);
+            assert!(assert_deposits_not_paused(&env).is_ok());
+        });
+    }
+}
