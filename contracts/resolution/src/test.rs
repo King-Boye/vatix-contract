@@ -1641,4 +1641,102 @@ fn unchallenged_finalize_refunds_full_bond() {
     assert_eq!(balance(&env, &token, &proposer), BOND);
     assert_eq!(balance(&env, &token, &this), 0);
 }
+
+/// Issue #1024: `challenge` with a bond below `MIN_CHALLENGE_BOND_AMOUNT`
+/// must be rejected with `InsufficientChallengeBond`, leave the candidate
+/// `Proposed` with no `ChallengeRecord` appended, and a bond of exactly the
+/// minimum must succeed and record exactly one challenger with that bond.
+#[test]
+fn challenge_rejects_bond_below_minimum_and_accepts_exact_minimum() {
+    let env = Env::default();
+    let (client, _, _, token) = setup(&env);
+    set_time(&env, 1_000);
+
+    let proposer = Address::generate(&env);
+    fund(&env, &token, &proposer, BOND);
+    let candidate_id = client.propose(
+        &proposer,
+        &9u32,
+        &true,
+        &signature(&env),
+        &(1_000 + 10 * DEFAULT_WINDOW),
+        &evidence(&env),
+        &DEFAULT_WINDOW,
+        &BOND,
+    );
+
+    let challenger = Address::generate(&env);
+    fund(&env, &token, &challenger, crate::MIN_CHALLENGE_BOND_AMOUNT);
+    let uri = String::from_str(&env, "ipfs://below-min");
+    assert_eq!(
+        client.try_challenge(
+            &challenger,
+            &candidate_id,
+            &uri,
+            &(crate::MIN_CHALLENGE_BOND_AMOUNT - 1),
+        ),
+        Err(Ok(ContractError::InsufficientChallengeBond))
+    );
+
+    // Rejected challenge must not change candidate status or append a record.
+    let candidate = client.get_candidate(&candidate_id).unwrap();
+    assert_eq!(candidate.status, crate::types::CandidateStatus::Proposed);
+    assert!(client.get_challengers(&candidate_id).is_empty());
+
+    // Exactly the minimum bond succeeds and records one challenger.
+    client.challenge(
+        &challenger,
+        &candidate_id,
+        &uri,
+        &crate::MIN_CHALLENGE_BOND_AMOUNT,
+    );
+    let challengers = client.get_challengers(&candidate_id);
+    assert_eq!(challengers.len(), 1);
+    let record = challengers.get(0).unwrap();
+    assert_eq!(record.challenger, challenger);
+    assert_eq!(record.bond, crate::MIN_CHALLENGE_BOND_AMOUNT);
+    let candidate = client.get_candidate(&candidate_id).unwrap();
+    assert_eq!(candidate.status, crate::types::CandidateStatus::Challenged);
 }
+
+/// Issue #1023: `finalize` must reject a candidate whose `signature_expiry`
+/// has passed, leaving it `Proposed` with `finalized_at` still `None` and
+/// without ever invoking the market contract's `resolve_market`.
+#[test]
+fn finalize_rejects_expired_signature_and_leaves_candidate_unresolved() {
+    let env = Env::default();
+    let (client, _, market_contract, token) = setup(&env);
+    set_time(&env, 1_000);
+
+    let proposer = Address::generate(&env);
+    fund(&env, &token, &proposer, BOND);
+    let window = 300u64;
+    // Expiry one second past the challenge deadline, so the window has
+    // closed but the signature has also already expired.
+    let expiry = 1_000 + window;
+    let candidate_id = client.propose(
+        &proposer,
+        &10u32,
+        &true,
+        &signature(&env),
+        &expiry,
+        &evidence(&env),
+        &window,
+        &BOND,
+    );
+
+    set_time(&env, expiry + 1);
+    let finalizer = Address::generate(&env);
+    assert_eq!(
+        client.try_finalize(&finalizer, &candidate_id),
+        Err(Ok(ContractError::SignatureExpired))
+    );
+
+    let candidate = client.get_candidate(&candidate_id).unwrap();
+    assert_eq!(candidate.status, crate::types::CandidateStatus::Proposed);
+    assert_eq!(candidate.finalized_at, None);
+
+    let market_client = MockMarketClient::new(&env, &market_contract);
+    assert_eq!(market_client.get_last_resolved(), None);
+}
+
